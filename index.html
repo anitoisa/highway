@@ -134,7 +134,11 @@ body.popup #simPane > :not(canvas):not(#popHint) { display: none; }
   <div class="toolbar">
     <div class="pset" data-for="fence"><label>單元寬度</label><input type="number" id="fenceW" min="2" step="2" value="20"> m</div>
     <div class="pset" data-for="wall">
-      <label>一組</label><input type="number" id="wallN" min="1" max="200" step="1" value="30" title="畫布寬度＝幾片板（每片 2 m），沿線重複"> 片 <span class="status" id="wallWv"></span>
+      <label for="wallLength">測試牆段</label><input type="number" id="wallLength" min="2" max="700" step="1" value="250" title="起點直立式測試牆的實際長度（2–700 m）"> m
+      <span class="seg" id="wallPresets"><button data-length="100">100 m</button><button data-length="250" class="on">250 m</button><button data-length="700">700 m</button></span>
+      <button id="wallStart">前往測試牆</button>
+      <label for="wallMapping">鋪圖</label><select id="wallMapping"><option value="fit">整段鋪圖一次</option><option value="repeat">循環重複</option></select>
+      <label for="wallRepeat">循環長度</label><input type="number" id="wallRepeat" min="2" max="700" step="1" value="40" disabled> m <span class="status" id="wallWv"></span>
       <select id="mode" title="上色方式"><option value="板塊">每片板單色</option><option value="自由">圖案跨板</option></select>
       <span class="sep"></span>
       <label>牆高</label><select id="wallRows"></select>
@@ -250,7 +254,7 @@ offs(MATS.road, -1, -2); offs(MATS.roadIn, -1, -2); for (const k of ['white', 'y
 // 2026-10-27 使用者：「路段太多，不知道要看什麼」→ no empty straights / curves any more: the three scenarios follow each other with
 // 100 m transitions; round ① on the straight, round ② in curves (straight / curve is a property of each scenario now)
 const SEG = [
-  ['straight', 150, 0, '起點', ''], ['tunnel', 980, 0, '隧道①（直線）', '隧道①'], ['straight', 100, 0, '過渡', ''],
+  ['straight', 1000, 0, '直立式隔音牆測試', '隔音牆測試'], ['tunnel', 980, 0, '隧道①（直線）', '隧道①'], ['straight', 100, 0, '過渡', ''],
   ['bridge', 1350, 0, '鋼構橋①（直線）', '鋼構橋①'], ['straight', 100, 0, '過渡', ''], ['trees', 900, 0, '欒樹①（直線）', '欒樹①'],
   ['straight', 100, 0, '過渡', ''], ['tunnel', 980, 1800, '隧道②（右彎）', '隧道②・彎'], ['straight', 100, 0, '過渡', ''],
   ['bridge', 1350, -1500, '鋼構橋②（左彎）', '鋼構橋②・彎'], ['straight', 100, 0, '過渡', ''], ['trees', 900, 1200, '欒樹②（右彎）', '欒樹②・彎'],
@@ -336,6 +340,15 @@ KOEL.forEach((K, i) => { const s = i ? -1 : 1;
     WALLS[sg] = WALLS[sg].flatMap(([a, b]) => spans(a, b, wholes)).filter(([a, b]) => b - a > 20);
   }
 }
+// Dedicated straight test bay; other scenario walls retain their original extents.
+const WALL_TEST_START = 80;
+const SCENARIO_WALLS = Object.fromEntries([1, -1].map(sg => [sg, WALLS[sg].map(v => v.slice())]));
+const wallMetres = id => Math.max(2, Math.min(700, Number($(id).value) || (id === 'wallLength' ? 250 : 40)));
+function setWallRanges() {
+  const length = wallMetres('wallLength');
+  for (const sg of [1, -1]) WALLS[sg] = [[WALL_TEST_START, WALL_TEST_START + length], ...SCENARIO_WALLS[sg]];
+}
+setWallRanges();
 const fenceAt = (sg, m) => FENCE[sg].some(([a, b]) => m >= a && m < b), wallAt = (sg, m) => WALLS[sg].some(([a, b]) => m >= a && m < b);
 
 const H_FAR = -14;                                        // horizon plane: below every bit of the ground strip
@@ -601,24 +614,27 @@ let pierGeo;
 // rows from the bottom; the top uGlass rows are transparent panels (tinted by the design); uTex = panel relief (素面／水平紋／垂直格柵)
 function wallMat(tex) {
   return new THREE.ShaderMaterial({ side: THREE.DoubleSide, transparent: true,
-    uniforms: Object.assign(common(), { tDesign: { value: tex }, uW: { value: 60 }, uNu: { value: 30 }, uRows: { value: WL.rows }, uRowH: { value: WL.row_h }, uMode: { value: 1 },
+    uniforms: Object.assign(common(), { tDesign: { value: tex }, uW: { value: 250 }, uLength: { value: 250 }, uFit: { value: 1 }, uBay: { value: WL.bay_m }, uRows: { value: WL.rows }, uRowH: { value: WL.row_h }, uMode: { value: 1 },
                                         uGlass: { value: 0 }, uTex: { value: 0 } }),
     vertexShader: `attribute float aAlong; attribute float aH; attribute float aBay;
       varying float vAlong; varying float vH; varying float vBay; varying vec3 vN; varying float vDepth;
       void main() { vAlong = aAlong; vH = aH; vBay = aBay; vN = normal; vec4 mv = modelViewMatrix * vec4(position, 1.0); vDepth = -mv.z; gl_Position = projectionMatrix * mv; }`,
     fragmentShader: LIGHT + `
-      uniform sampler2D tDesign; uniform float uW, uNu, uRows, uRowH, uMode, uGlass, uTex;
+      uniform sampler2D tDesign; uniform float uW, uLength, uFit, uBay, uRows, uRowH, uMode, uGlass, uTex;
       varying float vAlong; varying float vH; varying float vBay; varying vec3 vN; varying float vDepth;
       void main() {
         vec3 albedo; vec3 n = normalize(vN); float r = clamp(floor(vH / uRowH), 0.0, uRows - 1.0);
         bool glass = r >= uRows - uGlass - 0.5;
         if (gl_FrontFacing) {
-          if (uMode > 0.5) {                                   // 板塊: panel i -> canvas cell (i mod N), one colour per panel
-            float a = (mod(floor(vBay + 0.5), uNu) + 0.5) / uNu;
+          if (uMode > 0.5) {                                   // 板塊: sample each bay centre; fit once or repeat in physical metres
+            float start = floor(vBay + 0.5) * uBay;
+            float centre = (start + min(start + uBay, uLength)) * 0.5;
+            float a = uFit > 0.5 ? clamp(centre / uLength, 0.0, 1.0) : fract(centre / uW);
             albedo = textureLod(tDesign, vec2(1.0 - a, (r + 0.5) / uRows), 0.0).rgb;
-          } else {                                             // 自由: real metres, canvas left = driving forward
-            float uc = -vAlong / uW, vc = clamp(vH / (uRows * uRowH), 0.0, 1.0);
-            albedo = textureGrad(tDesign, vec2(fract(uc), vc), vec2(dFdx(uc), dFdx(vc)), vec2(dFdy(uc), dFdy(vc))).rgb;
+          } else {                                             // 自由: distance from this wall start, canvas left = driving forward
+            float uc = 1.0 - vAlong / (uFit > 0.5 ? uLength : uW), vc = clamp(vH / (uRows * uRowH), 0.0, 1.0);
+            float u = uFit > 0.5 ? clamp(uc, 0.0, 1.0) : fract(uc);
+            albedo = textureGrad(tDesign, vec2(u, vc), vec2(dFdx(uc), dFdx(vc)), vec2(dFdy(uc), dFdy(vc))).rgb;
           }
           if (!glass && uTex > 0.5) {
             if (uTex < 1.5) albedo *= 0.9 + 0.1 * smoothstep(0.35, 0.5, abs(fract(vH * 10.0) - 0.5) * 2.0);    // 吸音金屬板: 10 cm ribs
@@ -632,7 +648,7 @@ function wallMat(tex) {
 const WMATS = [], WALL_OBJ = [];
 let WALL_GEOM = { len: 0, area: 0, glass: 0 };
 // sound walls on the edge line, lane side facing the traffic of that line; on a 0.35 m concrete curb, H-posts every 2 m.
-// panels counted from the start of each wall in that line's driving direction (板塊 mode), along = 里程 (自由 mode).
+// Both mapping modes start at each wall's upstream end in its driving direction.
 // 端部階梯: the end panels step down one row per panel. Rebuilt when the height / steps change.
 function buildWalls() {
   for (const o of WALL_OBJ) { scene.remove(o); o.geometry.dispose(); } WALL_OBJ.length = 0;
@@ -640,25 +656,25 @@ function buildWalls() {
   const posts = [], curb = new Geo(), CURB = [[-0.2, 0], [-0.2, 0.35], [0.2, 0.35], [0.2, 0]], B0 = 0.35;
   let wi = 0, len = 0, area = 0, glassA = 0;
   for (const sg of [1, -1]) for (const [a, b] of WALLS[sg]) {
-    const y = sg * Y_WALL, n = Math.floor((b - a) / WL.bay_m), mb = a + n * WL.bay_m, line = sg > 0 ? 'SB' : 'NB';
-    let w = WMATS[wi]; if (!w) { w = { mat: wallMat(null), line }; WMATS.push(w); } w.line = line; wi++;
+    const y = sg * Y_WALL, n = Math.ceil((b - a) / WL.bay_m), mb = b, line = sg > 0 ? 'SB' : 'NB';
+    let w = WMATS[wi]; if (!w) { w = { mat: wallMat(null), line }; WMATS.push(w); } w.line = line; w.mat.uniforms.uLength.value = b - a; wi++;
     const pos = [], nor = [], al = [], hh = [], bi = [], idx = [], rowsOf = k => Math.max(1, WL.rows - Math.max(0, steps - Math.min(k, n - 1 - k)));
     for (let k = 0; k < n; k++) {
-      const m0 = a + k * WL.bay_m, m1 = m0 + WL.bay_m, F0 = fr(m0), F1 = fr(m1), bay = sg > 0 ? k : n - 1 - k, H = rowsOf(k) * WL.row_h;
+      const m0 = sg > 0 ? a + k * WL.bay_m : Math.max(a, b - (k + 1) * WL.bay_m), m1 = sg > 0 ? Math.min(b, m0 + WL.bay_m) : b - k * WL.bay_m, F0 = fr(m0), F1 = fr(m1), bay = k, H = rowsOf(k) * WL.row_h;
       const p0 = P(F0, y, gnd(m0, y, F0) + B0), p1 = P(F1, y, gnd(m1, y, F1) + B0);
       const nx = -sg * (F0.rx + F1.rx) / 2, nz = -sg * (F0.rz + F1.rz) / 2, L = Math.hypot(nx, nz);   // toward the lanes
       const e = [p1[0] - p0[0], p1[2] - p0[2]], flip = (-e[1] * nx + e[0] * nz) < 0, s = pos.length / 3;
       for (const [q, hgt, mm] of [[p0, 0, m0], [p1, 0, m1], [p1, H, m1], [p0, H, m0]]) {
-        pos.push(q[0], q[1] + hgt, q[2]); nor.push(nx / L, 0, nz / L); al.push(alOf(sg, mm)); hh.push(hgt); bi.push(bay); }
+        pos.push(q[0], q[1] + hgt, q[2]); nor.push(nx / L, 0, nz / L); al.push(sg > 0 ? mm - a : b - mm); hh.push(hgt); bi.push(bay); }
       if (!flip) idx.push(s, s + 1, s + 2, s, s + 2, s + 3); else idx.push(s, s + 2, s + 1, s, s + 3, s + 2);
-      len += WL.bay_m; area += WL.bay_m * H; glassA += WL.bay_m * WL.row_h * Math.max(0, Math.min(glass, rowsOf(k) - (WL.rows - glass) >= 0 ? rowsOf(k) - (WL.rows - glass) : 0));
+      len += m1 - m0; area += (m1 - m0) * H; glassA += (m1 - m0) * WL.row_h * Math.max(0, Math.min(glass, rowsOf(k) - (WL.rows - glass) >= 0 ? rowsOf(k) - (WL.rows - glass) : 0));
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
     g.setAttribute('aAlong', new THREE.Float32BufferAttribute(al, 1)); g.setAttribute('aH', new THREE.Float32BufferAttribute(hh, 1));
     g.setAttribute('aBay', new THREE.Float32BufferAttribute(bi, 1)); g.setIndex(idx);
-    const me = new THREE.Mesh(g, w.mat); me.name = 'wall_' + line; me.userData = { sg }; me.renderOrder = 2; scene.add(me); WALL_OBJ.push(me);
-    for (let k = 0; k <= n; k++) { const m = a + k * WL.bay_m, F = fr(m), H = Math.max(rowsOf(Math.min(k, n - 1)), rowsOf(Math.max(0, k - 1))) * WL.row_h;
+    const me = new THREE.Mesh(g, w.mat); me.name = 'wall_' + line; me.userData = { sg, length: b - a, start: a, end: b }; me.renderOrder = 2; scene.add(me); WALL_OBJ.push(me);
+    for (let k = 0; k <= n; k++) { const m = sg > 0 ? Math.min(b, a + k * WL.bay_m) : Math.max(a, b - k * WL.bay_m), F = fr(m), H = Math.max(rowsOf(Math.min(k, n - 1)), rowsOf(Math.max(0, k - 1))) * WL.row_h;
       posts.push(mtx(P(F, y, gnd(m, y, F) + B0), -F.p, 0.15, H + 0.08, 0.2)); }
     sweep(curb, CURB, false, range(a, mb, 4), (m, F, u, v) => P(F, y + u, gnd(m, y, F) - 0.1 + (v > 0 ? B0 + 0.1 : 0)));
   }
@@ -798,7 +814,17 @@ class Board {
     this.tex.colorSpace = THREE.SRGBColorSpace; this.tex.wrapS = THREE.RepeatWrapping; this.tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
     this.file = opts.file; this.guides = opts.guides || (() => {}); this.cellOf = opts.cellOf || null; this.sel = -1; this.cell = null; this.dirty = true;
   }
-  setSize(wM, hM, pxW, pxH) { this.wM = wM; this.hM = hM; this.out.width = pxW || Math.max(2, Math.round(wM * PXM)); this.out.height = pxH || Math.max(1, Math.round(hM * PXM)); this.dirty = true; this.cell = null; }
+  setSize(wM, hM, pxW, pxH) {
+    const oldW = this.out.width, oldH = this.out.height;
+    this.wM = wM; this.hM = hM;
+    const limit = this.key === 'wall' ? Math.min(8192, renderer.capabilities.maxTextureSize) : Infinity;
+    const density = Math.min(PXM, limit / Math.max(wM, hM));
+    this.out.width = Math.min(limit, pxW || Math.max(2, Math.round(wM * density)));
+    this.out.height = Math.min(limit, pxH || Math.max(1, Math.round(hM * density)));
+    // Preserve the composition when changing the design span or GPU resolution.
+    for (const L of this.layers) { L.x *= this.out.width / oldW; L.w *= this.out.width / oldW; L.y *= this.out.height / oldH; L.h *= this.out.height / oldH; }
+    this.dirty = true; this.cell = null;
+  }
   render() {
     const c = this.out.getContext('2d'); c.clearRect(0, 0, this.out.width, this.out.height);
     if (!this.transparent || this.layers.length) { c.fillStyle = this.bg; c.fillRect(0, 0, this.out.width, this.out.height); }
@@ -816,13 +842,18 @@ class Board {
   changed() { this.dirty = true; scheduleApply(this); drawBoard(); updateButtons(); }
 }
 const wallGuides = (b, c, s) => {                        // panel joints (every bay) and rows, like the templates; transparent rows shaded
-  const N = Math.round(b.wM / WL.bay_m), gl = Number($('wallGlass').value) || 0;
-  if (gl) { c.fillStyle = 'rgba(120,200,255,.18)'; c.fillRect(0, 0, b.out.width * s, gl * WL.row_h * PXM * s); }
+  const N = Math.ceil(b.wM / WL.bay_m), gl = Number($('wallGlass').value) || 0;
+  if (gl) { c.fillStyle = 'rgba(120,200,255,.18)'; c.fillRect(0, 0, b.out.width * s, gl / WL.rows * b.out.height * s); }
   c.strokeStyle = 'rgba(255,0,255,.55)'; c.lineWidth = 1;
-  for (let i = 0; i <= N; i++) { const x = i * WL.bay_m * PXM * s; c.beginPath(); c.moveTo(x + .5, 0); c.lineTo(x + .5, b.out.height * s); c.stroke(); }
-  for (let r = 0; r <= WL.rows; r++) { const y = r * WL.row_h * PXM * s; c.beginPath(); c.moveTo(0, y + .5); c.lineTo(b.out.width * s, y + .5); c.stroke(); }
+  for (let i = 0; i <= N; i++) { const x = Math.max(0, b.wM - i * WL.bay_m) / b.wM * b.out.width * s; c.beginPath(); c.moveTo(x + .5, 0); c.lineTo(x + .5, b.out.height * s); c.stroke(); }
+  for (let r = 0; r <= WL.rows; r++) { const y = r / WL.rows * b.out.height * s; c.beginPath(); c.moveTo(0, y + .5); c.lineTo(b.out.width * s, y + .5); c.stroke(); }
 };
-const wallCell = (b, x, y) => { const cw = WL.bay_m * PXM, ch = WL.row_h * PXM; return { x: Math.floor(x / cw) * cw, y: Math.floor(y / ch) * ch, w: cw, h: ch }; };
+const wallCell = (b, x, y) => {
+  const cw = WL.bay_m / b.wM * b.out.width, ch = b.out.height / WL.rows;
+  const fromRight = Math.floor(Math.max(0, Math.min(b.out.width - 1e-6, b.out.width - x)) / cw);
+  const right = b.out.width - fromRight * cw, xx = Math.max(0, right - cw);
+  return { x: xx, y: Math.floor(Math.max(0, Math.min(b.out.height - 1e-6, y)) / ch) * ch, w: right - xx, h: ch };
+};
 const fenceGuides = (b, c, s) => { c.strokeStyle = 'rgba(255,0,255,.45)'; for (let x = 0; x <= b.wM + 1e-6; x += 2) { const X = x * PXM * s; c.beginPath(); c.moveTo(X + .5, 0); c.lineTo(X + .5, b.out.height * s); c.stroke(); } };
 const fenceCell = (b, x) => { const cw = 2 * PXM; return { x: Math.floor(x / cw) * cw, y: 0, w: cw, h: b.out.height }; };
 const bandGuides = (b, c, s) => {
@@ -858,11 +889,16 @@ function rebindWalls() { for (const w of WMATS) w.mat.uniforms.tDesign.value = B
   g(); $('wallRows').addEventListener('change', () => { WL.rows = Number($('wallRows').value); RW = WL.rows * WL.row_h; g(); wallSettings(true); });
 }
 function wallSettings(rebuild) {
-  const N = Math.max(1, Math.round(Number($('wallN').value) || 30)), W = N * WL.bay_m, mode = $('mode').value === '板塊' ? 1 : 0;
-  const bw = BOARDS.wall; if (Math.abs(bw.wM - W) > 1e-6 || Math.abs(bw.hM - RW) > 1e-6) { bw.setSize(W, RW); bw.changed(); applyBoard(bw); }
-  if (rebuild) buildWalls();
-  for (const { mat } of WMATS) { const U = mat.uniforms; U.uW.value = W; U.uNu.value = N; U.uMode.value = mode; U.uTex.value = Number($('wallTex').value) || 0; U.uRowH.value = WL.row_h; }
-  $('wallWv').textContent = '＝ ' + W + ' m';
+  const length = wallMetres('wallLength'), repeat = wallMetres('wallRepeat'), fit = $('wallMapping').value === 'fit';
+  const W = fit ? length : repeat, mode = $('mode').value === '板塊' ? 1 : 0;
+  const bw = BOARDS.wall;
+  if (Math.abs(bw.wM - W) > 1e-6 || Math.abs(bw.hM - RW) > 1e-6) { bw.setSize(W, RW); bw.changed(); applyBoard(bw); }
+  if (rebuild) { setWallRanges(); buildWalls(); }
+  bw.tex.wrapS = fit ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping; bw.tex.needsUpdate = true;
+  for (const { mat } of WMATS) { const U = mat.uniforms; U.uW.value = repeat; U.uFit.value = fit ? 1 : 0; U.uMode.value = mode; U.uTex.value = Number($('wallTex').value) || 0; U.uRowH.value = WL.row_h; }
+  $('wallRepeat').disabled = fit;
+  $('wallWv').textContent = `牆段 ${length} m・${Math.ceil(length / WL.bay_m)} 格／排｜` + (fit ? '每段鋪滿一次' : `每 ${repeat} m 重複`) + '（改長度會等比例調整圖層位置與尺寸）';
+  document.querySelectorAll('[data-length]').forEach(el => el.classList.toggle('on', Number(el.dataset.length) === length));
   rebindWalls(); drawBoard(); updateStats();
 }
 function fenceSettings() {
@@ -870,7 +906,13 @@ function fenceSettings() {
   if (Math.abs(BOARDS.fence.wM - W) > 1e-6) { BOARDS.fence.setSize(W, 2.4); BOARDS.fence.changed(); applyBoard(BOARDS.fence); }
   fenceMat.uniforms.uFW.value = W; drawBoard();
 }
-$('wallN').addEventListener('input', () => wallSettings()); $('mode').addEventListener('change', () => wallSettings());
+for (const id of ['wallLength', 'wallRepeat']) {
+  $(id).addEventListener('input', () => { if ($(id).value && Number.isFinite($(id).valueAsNumber)) wallSettings(id === 'wallLength'); });
+  $(id).addEventListener('change', () => { $(id).value = wallMetres(id); wallSettings(id === 'wallLength'); });
+}
+$('wallMapping').addEventListener('change', () => wallSettings());
+$('wallPresets').addEventListener('click', e => { if (!e.target.dataset.length) return; $('wallLength').value = e.target.dataset.length; wallSettings(true); gotoMil(WALL_TEST_START - 30); });
+$('wallStart').onclick = () => gotoMil(WALL_TEST_START - 30); $('mode').addEventListener('change', () => wallSettings());
 for (const id of ['wallGlass', 'wallStep']) $(id).addEventListener('change', () => wallSettings(true));
 $('wallTex').addEventListener('change', () => wallSettings());
 $('fenceW').addEventListener('input', fenceSettings);
@@ -957,7 +999,7 @@ function boardScale() {                                 // fit the stage; very w
   const b = active, aw = stage.offsetWidth - 22, ah = Math.max(40, stage.offsetHeight - 16 - 14);
   const minH = Math.min(ah, b.key === 'band' ? 48 : 100);
   const base = Math.min(ah / b.out.height, Math.max(aw / b.out.width, minH / b.out.height));
-  const z = Number($('bZoom').value) / 100; return base * Math.pow(6, z);
+  const z = Number($('bZoom').value) / 100; return Math.min(base * Math.pow(6, z), 16384 / b.out.width);
 }
 function drawBoard() {
   if (POPUP) return;                                      // no editor in the 另開視窗
@@ -1153,11 +1195,13 @@ async function loadXlsx(file) {
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
     const rows = n => wb.Sheets[n] ? XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: null }) : [];
     const basic = {}; rows('基本').slice(1).forEach(r => { if (r[0]) basic[r[0]] = r[1]; });
-    if (basic['單元寬度_m']) $('wallN').value = Math.max(1, Math.round(Number(basic['單元寬度_m']) / WL.bay_m));
+    if (basic['單元寬度_m']) { $('wallRepeat').value = basic['單元寬度_m']; $('wallMapping').value = 'repeat'; }
+    if (basic['牆段長度_m']) $('wallLength').value = basic['牆段長度_m'];
+    if (basic['貼圖模式']) $('wallMapping').value = String(basic['貼圖模式']).trim() === '整段' ? 'fit' : 'repeat';
     if (basic['上色模式']) $('mode').value = String(basic['上色模式']).trim() === '自由' ? '自由' : '板塊';
     if (basic['施工圍籬單元寬度_m']) $('fenceW').value = basic['施工圍籬單元寬度_m'];
     const br = {}; rows('鋼構橋').slice(1).forEach(r => { if (r[0]) br[String(r[0]).trim()] = r.slice(1, 7); });
-    setBridge(br, file.name); wallSettings(); fenceSettings();
+    setBridge(br, file.name); wallSettings(true); fenceSettings();
     setSlot('xlsx', 'ok', file.name + '　' + stamp());
   } catch (e) { setSlot('xlsx', 'warn', '讀取失敗：' + e.message); }
 }
@@ -1265,12 +1309,13 @@ function pickAt(e) {
     const b = BOARDS.fence, uc = -att('aAlong') / b.wM, x = (uc - Math.floor(uc)) * b.out.width;
     setActive('fence'); b.cell = fenceCell(b, x); drawBoard(); return;
   }
-  const key = 'wall', b = BOARDS[key], N = Math.round(b.wM / WL.bay_m);
-  const row = Math.min(WL.rows - 1, Math.floor(att('aH') / WL.row_h)), y = (WL.rows - 1 - row) * WL.row_h * PXM;
-  let x;
-  if ($('mode').value === '板塊') { const bay = Math.round(g.attributes.aBay.getX(ids[0])); x = (N - 1 - (bay % N)) * WL.bay_m * PXM; }
-  else { const uc = -att('aAlong') / b.wM; x = (uc - Math.floor(uc)) * b.out.width; }
-  setActive(key); b.cell = wallCell(b, x, y + 1); drawBoard();
+  const key = 'wall', b = BOARDS[key], length = h.object.userData.length, fit = $('wallMapping').value === 'fit';
+  const row = Math.min(WL.rows - 1, Math.floor(att('aH') / WL.row_h)), y = (WL.rows - 1 - row + 0.5) / WL.rows * b.out.height;
+  let along = att('aAlong');
+  if ($('mode').value === '板塊') { const start = Math.round(g.attributes.aBay.getX(ids[0])) * WL.bay_m; along = (start + Math.min(start + WL.bay_m, length)) / 2; }
+  const uc = 1 - along / (fit ? length : wallMetres('wallRepeat'));
+  const x = (fit ? Math.max(0, Math.min(1, uc)) : uc - Math.floor(uc)) * b.out.width;
+  setActive(key); b.cell = wallCell(b, x, y); drawBoard();
 }
 const rt = new THREE.WebGLRenderTarget(16, 16, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });   // mips = soft glare
 rt.depthTexture = new THREE.DepthTexture(16, 16); rt.depthTexture.type = THREE.UnsignedIntType;
@@ -1385,8 +1430,8 @@ const statsOf = key => {                                   // whole-route totals
 };
 
 // demo scheme
-$('wallN').value = Math.max(1, Math.round(D.demo.W / WL.bay_m)); $('mode').value = D.demo.mode; $('fenceW').value = D.demo.fenceW;
-setBridge(D.demo.bridge, '示範：' + D.demo.name); wallSettings(true); fenceSettings(); applyShape(); setCamMode(); setActive('bridge');
+$('wallLength').value = 250; $('wallMapping').value = 'fit'; $('wallRepeat').value = D.demo.W; $('mode').value = '自由'; $('fenceW').value = D.demo.fenceW;
+setBridge(D.demo.bridge, '示範：' + D.demo.name); wallSettings(true); fenceSettings(); applyShape(); setCamMode(); setActive('wall'); gotoMil(WALL_TEST_START - 30);
 if (!POPUP) (async () => {                                // the 另開視窗 gets the canvases from the main window instead
   for (const [slot, key] of [['wall', 'SB'], ['fence', 'fence']]) if (D.demo.img[key]) await setFileImage(slot, D.demo.img[key], '示範：' + D.demo.name);
   rebindWalls(); drawBoard();
@@ -1447,7 +1492,7 @@ function sendTick() {
     blur: $('blur').checked, adapt: $('adapt').checked, traffic: $('traffic').checked, orb: [ORB.az, ORB.el, ORB.r], elv: ELV.fov,
     free: free ? [free.eye.toArray(), free.target.toArray()] : null });
 }
-const DESIGN_IDS = ['wallN', 'mode', 'wallRows', 'wallGlass', 'wallStep', 'wallTex', 'fenceW', 'cAcc'];
+const DESIGN_IDS = ['wallLength', 'wallMapping', 'wallRepeat', 'mode', 'wallRows', 'wallGlass', 'wallStep', 'wallTex', 'fenceW', 'cAcc'];
 const designOf = () => ({ v: Object.fromEntries(DESIGN_IDS.map(id => [id, $(id).value])), acc: $('pAccBand').checked,
   faces: [...document.querySelectorAll('#faces input[type=color]')].map(e => e.value), bands: [...document.querySelectorAll('#faces input[type=checkbox]')].map(e => e.checked), sh: SH });
 function adoptPopup(now) {                                  // this window was throttled (e.g. covered by a full-screen 另開視窗): continue from where that one is
@@ -1494,7 +1539,7 @@ function followMain(now, v, dt) {                           // own clock for smo
 function applyDesign(d) {
   const v = d.v, rowsCh = $('wallRows').value !== v.wallRows;
   if (rowsCh) { $('wallRows').value = v.wallRows; $('wallRows').dispatchEvent(new Event('change')); }   // rebuilds the 透明板 options + the walls
-  const geo = $('wallGlass').value !== v.wallGlass || $('wallStep').value !== v.wallStep;
+  const geo = $('wallLength').value !== v.wallLength || $('wallGlass').value !== v.wallGlass || $('wallStep').value !== v.wallStep;
   for (const id of DESIGN_IDS) $(id).value = v[id];
   $('pAccBand').checked = d.acc;
   document.querySelectorAll('#faces input[type=color]').forEach((e, i) => { e.value = d.faces[i]; PART[e.dataset.part].uniforms.cF.value[Number(e.dataset.f)].set(d.faces[i]); });
@@ -1559,3 +1604,4 @@ requestAnimationFrame(frame);
 </script>
 </body>
 </html>
+
